@@ -1,1 +1,161 @@
+# ======================
+# БЛОК 1: Установка и импорт библиотек
+# ======================
+!pip uninstall -y llama-index
+!pip install llama-index-core llama-index-llms-huggingface llama-index-embeddings-huggingface llama-index-readers-file
+!pip install transformers torch sentence-transformers gradio
+!pip install -U langchain-community
+!pip install -U bitsandbytes
 
+# Импорт библиотек
+from llama_index.core import VectorStoreIndex, Settings, PromptTemplate
+from llama_index.llms.huggingface import HuggingFaceLLM
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import gradio as gr
+import os
+from transformers import BitsAndBytesConfig, AutoTokenizer, AutoModelForCausalLM
+from langchain.llms.huggingface_pipeline import HuggingFacePipeline
+from llama_index.core import Settings
+from llama_index.core import VectorStoreIndex, Settings, StorageContext
+from llama_index.core.vector_stores import SimpleVectorStore
+
+# БЛОК 2: Подготовка базы знаний
+# ======================
+os.makedirs("knowledge_base", exist_ok=True)
+
+with open("knowledge_base/wallpapers.md", "w", encoding="utf-8") as f:
+    f.write("""
+## Типы обоев
+- **Бумажные**: Недорогие, экологичные, не влагостойкие
+- **Виниловые**: Устойчивы к влаге, моющиеся
+- **Флизелиновые**: Скрывают неровности, долговечные
+
+## Рекомендации по комнатам
+- **Кухня**: Виниловые (устойчивость к пару/жиру)
+- **Спальня**: Бумажные или флизелиновые (дышащие)
+- **Гостиная**: Флизелиновые с текстурой
+
+## Советы по уходу
+- Виниловые можно мыть мягкой губкой
+- Бумажные только протирать сухой тканью
+""")
+
+# Загрузка документов
+documents = SimpleDirectoryReader("knowledge_base").load_data()
+
+import torch
+# БЛОК 3: Настройка модели и токенизатора
+# ======================
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+)
+
+model_name = "IlyaGusev/saiga_mistral_7b"
+tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=quantization_config,
+    torch_dtype=torch.float16,
+    device_map="auto"
+)
+
+# БЛОК 4: Настройка LLM и эмбеддингов
+# ======================
+llm = HuggingFaceLLM(
+    model=model,
+    tokenizer=tokenizer,
+    context_window=2048,
+    max_new_tokens=256,
+    generate_kwargs={"temperature": 0.3, "do_sample": True},
+    device_map="auto",
+)
+
+Settings.llm = llm
+Settings.embed_model = HuggingFaceEmbedding(model_name="cointegrated/LaBSE-en-ru")
+Settings.chunk_size = 512
+
+
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.postprocessor import SentenceTransformerRerank
+# БЛОК 5: Создание индекса с улучшениями
+# ======================
+vector_store = SimpleVectorStore()
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
+index = VectorStoreIndex.from_documents(
+    documents,
+    storage_context=storage_context
+)
+
+# Настройка ретривера с исправленным импортом
+retriever = VectorIndexRetriever(
+    index=index,
+    similarity_top_k=3
+)
+
+# Настройка ранжирования
+rerank = SentenceTransformerRerank(
+    model="cross-encoder/stsb-distilroberta-base",
+    top_n=2
+)
+
+# БЛОК 6: Настройка промптов и безопасности
+# ======================
+system_prompt = """
+Ты эксперт по подбору обоев с 10-летним опытом. Отвечай профессионально, но доступно.
+Используй только факты из предоставленных данных. Если информации нет, скажи об этом.
+Не выдумывай несуществующие факты. Будь вежлив и готов помочь.
+Для кухни, ванной и других влажных помещений рекомендую влагостойкие варианты.
+Для спален и детских - экологичные и дышащие материалы.
+"""
+
+qa_prompt = PromptTemplate(
+    f"{system_prompt}\n"
+    "Контекст:\n{context_str}\n"
+    "Вопрос: {query_str}\n"
+    "Четкий ответ:"
+)
+
+# Фильтрация нежелательных запросов
+blacklist = ["политика", "религия", "секс", "насилие", "оружие"]
+
+def is_safe(query):
+    query_lower = query.lower()
+    return not any(bad_word in query_lower for bad_word in blacklist)
+
+
+# БЛОК 7: Создание и настройка query engine
+# ======================
+query_engine = index.as_query_engine(
+    similarity_top_k=3,
+    text_qa_template=qa_prompt,
+    node_postprocessors=[rerank]
+)
+
+# БЛОК 8: Тестирование системы
+# ======================
+def test_query(query):
+    if not is_safe(query):
+        return "Извините, я не могу ответить на этот вопрос."
+
+    response = query_engine.query(query)
+    return str(response)
+
+test_queries = [
+    "Какие обои лучше для кухни?",
+    "Что выбрать для спальни?",
+    "Какие обои самые экологичные?",
+    "Что думаешь о политике?",
+    "Можно ли клеить обои в ванной?"
+]
+
+for query in test_queries:
+    print(f"\nВопрос: {query}")
+    response = test_query(query)
+    print(f"Ответ: {response}")
+    print("-" * 60)
