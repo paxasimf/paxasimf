@@ -19,6 +19,11 @@ PET проекты:
 Помощник для выбора обоев. Ссылка на проект https://github.com/paxasimf/paxasimf/blob/main/Нейро%20сотрудник%20(помощник%20выбора%20обоев)
 
 
-Нейро сотрудник (помощник выбора обоев)
+
+
+Детекция объектов с использованием модели RT-DETR
+
+
+
 
 Стек: Python, OpenAI Whisper, SpeechRecognition, Flask, Google Text-to-Speech (gTTS)
